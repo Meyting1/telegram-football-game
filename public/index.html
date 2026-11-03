@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>بازی فوتبال دوبعدی - نسخه آزمایشی</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#101820;color:#f4f7f8;font-family:Tahoma,Arial,sans-serif}
+.wrap{max-width:900px;margin:auto;padding:14px}
+h1{font-size:20px;margin:8px 0}.muted{color:#aab7c4;font-size:13px;line-height:1.7}
+.panel{background:#1c2a35;border:1px solid #334653;border-radius:14px;padding:12px;margin:10px 0}
+input,button{font:inherit;border-radius:9px;padding:11px;border:1px solid #536777}
+input{background:#101820;color:white;min-width:0;flex:1}
+button{background:#2f9e72;color:white;border:0;font-weight:bold;cursor:pointer}
+button.secondary{background:#405363}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+#status{font-size:14px;line-height:1.8}.score{font-weight:bold;font-size:18px}
+canvas{width:100%;display:block;border-radius:12px;background:#19794d;touch-action:none;border:3px solid #d7e6dc}
+.hidden{display:none}.tag{display:inline-block;background:#304454;border-radius:20px;padding:4px 9px;font-size:12px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>⚽ فوتبال دیسکی | نسخه آزمایشی</h1>
+  <div class="muted">نسخه اولیه آنلاین دو نفره — فعلاً بدون کیف پول و پول واقعی</div>
+  <div class="panel">
+    <div class="row">
+      <input id="name" maxlength="18" placeholder="نام بازیکن" value="بازیکن">
+      <input id="room" maxlength="6" placeholder="کد اتاق (اختیاری)">
+      <button id="join">ورود / ساخت اتاق</button>
+    </div>
+    <p class="muted">برای ساخت اتاق، کد را خالی بگذار. برای پیوستن، کد دوستت را وارد کن.</p>
+    <div id="roomInfo" class="tag">هنوز وارد اتاق نشده‌ای</div>
+  </div>
+  <div class="panel">
+    <div class="row" style="justify-content:space-between">
+      <div class="score">🔵 آبی: <span id="blueScore">0</span></div>
+      <div class="score">🔴 قرمز: <span id="redScore">0</span></div>
+    </div>
+    <div id="status">ابتدا وارد یک اتاق شو. برای بازی آنلاین، بازیکن دوم باید با کد اتاق وارد شود.</div>
+  </div>
+  <canvas id="game" width="800" height="500"></canvas>
+  <div class="panel muted">
+    روش بازی: روی یکی از مهره‌های خودت لمس کن و به سمت مخالفی که می‌خواهی ضربه بزنی بکش، سپس رها کن.
+    هر بازیکن ۵ مهره دارد. اولین نسخه برای آزمایش حرکت، برخورد و نوبت‌بندی است.
+    <div class="row" style="margin-top:10px"><button id="reset" class="secondary">شروع دوباره محلی</button></div>
+  </div>
+</div>
+<script src="/socket.io/socket.io.js"></script>
+<script>
+const canvas=document.getElementById("game"),ctx=canvas.getContext("2d");
+const statusEl=document.getElementById("status"),roomInfo=document.getElementById("roomInfo");
+const socket=io();
+const W=800,H=500,R=17,BR=11,GOAL=150;
+let roomCode=null,playerIndex=-1,turn=0,started=false,animating=false,drag=null;
+let scores=[0,0],discs=[],ball, lastSentFinish=false;
+const friction=.986, restitution=.88;
+function initialState(){
+  discs=[];
+  for(let i=0;i<5;i++){
+    discs.push({x:115,y:105+i*72,vx:0,vy:0,team:0});
+    discs.push({x:685,y:105+i*72,vx:0,vy:0,team:1});
+  }
+  ball={x:400,y:250,vx:0,vy:0};
+  scores=[0,0]; updateScore(); draw();
+}
+function updateScore(){document.getElementById("blueScore").textContent=scores[0];document.getElementById("redScore").textContent=scores[1]}
+function say(t){statusEl.textContent=t}
+document.getElementById("join").onclick=()=>{
+  const code=document.getElementById("room").value.trim().toUpperCase();
+  socket.emit("joinRoom",{code,name:document.getElementById("name").value.trim()||"بازیکن"});
+};
+socket.on("joinError",say);
+socket.on("roomUpdate",r=>{
+  roomCode=r.code;playerIndex=r.players.findIndex(p=>p.id===socket.id);
+  roomInfo.textContent="کد اتاق: "+r.code+" | "+r.players.map(p=>p.name).join(" مقابل ");
+  document.getElementById("room").value=r.code;
+  if(r.players.length<2)say("اتاق ساخته شد. کد را برای بازیکن دوم بفرست.");
+});
+socket.on("gameStart",d=>{started=true;turn=d.firstTurn;initialState();say("بازی شروع شد. "+(turn===playerIndex?"نوبت توست.":"نوبت حریف است."));});
+socket.on("shot",s=>{
+  if(s.player!==turn)return;
+  const d=discs.filter(x=>x.team===s.player)[s.disc];
+  if(!d)return;
+  d.vx=s.vx;d.vy=s.vy;animating=true;lastSentFinish=false;
+  if(s.player!==playerIndex)say("حریف ضربه زد...");
+});
+socket.on("turnUpdate",d=>{turn=d.turn;animating=false;say(turn===playerIndex?"نوبت توست؛ یکی از مهره‌ها را بکش و رها کن.":"نوبت حریف است.");});
+socket.on("opponentLeft",()=>{started=false;roomInfo.textContent="حریف خارج شد";say("اتصال حریف قطع شد. برای ادامه اتاق جدید بسازید.");});
+function draw(){
+  ctx.clearRect(0,0,W,H);
+  ctx.fillStyle="#19794d";ctx.fillRect(0,0,W,H);
+  ctx.strokeStyle="rgba(255,255,255,.75)";ctx.lineWidth=4;
+  ctx.strokeRect(18,18,W-36,H-36);
+  ctx.beginPath();ctx.moveTo(W/2,18);ctx.lineTo(W/2,H-18);ctx.stroke();
+  ctx.beginPath();ctx.arc(W/2,H/2,75,0,Math.PI*2);ctx.stroke();
+  ctx.beginPath();ctx.arc(W/2,H/2,4,0,Math.PI*2);ctx.fillStyle="white";ctx.fill();
+  // goals
+  ctx.fillStyle="#102a20";ctx.fillRect(0,H/2-GOAL/2,24,GOAL);
+  ctx.fillRect(W-24,H/2-GOAL/2,24,GOAL);
+  ctx.strokeStyle="#fff";ctx.lineWidth=3;ctx.strokeRect(0,H/2-GOAL/2,24,GOAL);ctx.strokeRect(W-24,H/2-GOAL/2,24,GOAL);
+  discs.forEach(d=>{
+    ctx.beginPath();ctx.arc(d.x,d.y,R,0,Math.PI*2);ctx.fillStyle=d.team===0?"#2488ff":"#e74b4b";ctx.fill();
+    ctx.lineWidth=3;ctx.strokeStyle="#fff";ctx.stroke();
+    ctx.beginPath();ctx.arc(d.x-5,d.y-5,4,0,Math.PI*2);ctx.fillStyle="rgba(255,255,255,.65)";ctx.fill();
+  });
+  ctx.beginPath();ctx.arc(ball.x,ball.y,BR,0,Math.PI*2);ctx.fillStyle="#fff";ctx.fill();ctx.lineWidth=2;ctx.strokeStyle="#222";ctx.stroke();
+  if(drag){
+    ctx.beginPath();ctx.moveTo(drag.x,drag.y);ctx.lineTo(drag.px,drag.py);ctx.strokeStyle="#ffe66d";ctx.lineWidth=5;ctx.stroke();
+  }
+}
+function collide(a,b,ra,rb){
+  let dx=b.x-a.x,dy=b.y-a.y,dist=Math.hypot(dx,dy),min=ra+rb;
+  if(dist===0||dist>=min)return;
+  let nx=dx/dist,ny=dy/dist,overlap=min-dist;
+  a.x-=nx*overlap/2;a.y-=ny*overlap/2;b.x+=nx*overlap/2;b.y+=ny*overlap/2;
+  let rel=(b.vx-a.vx)*nx+(b.vy-a.vy)*ny;
+  if(rel<0){let impulse=-(1+restitution)*rel/2;a.vx-=impulse*nx;a.vy-=impulse*ny;b.vx+=impulse*nx;b.vy+=impulse*ny;}
+}
+function step(){
+  const all=discs.concat([ball]);
+  for(const o of all){
+    o.x+=o.vx/60;o.y+=o.vy/60;
+    o.vx*=friction;o.vy*=friction;
+    if(Math.abs(o.vx)<2)o.vx=0;if(Math.abs(o.vy)<2)o.vy=0;
+    if(o.y<(o===ball?BR:R)+18){o.y=(o===ball?BR:R)+18;o.vy=Math.abs(o.vy)*restitution;}
+    if(o.y>H-18-(o===ball?BR:R)){o.y=H-18-(o===ball?BR:R);o.vy=-Math.abs(o.vy)*restitution;}
+    if(o.x<24+(o===ball?BR:R)){o.x=24+(o===ball?BR:R);o.vx=Math.abs(o.vx)*restitution;}
+    if(o.x>W-24-(o===ball?BR:R)){o.x=W-24-(o===ball?BR:R);o.vx=-Math.abs(o.vx)*restitution;}
+  }
+  for(let i=0;i<discs.length;i++)for(let j=i+1;j<discs.length;j++)collide(discs[i],discs[j],R,R);
+  for(const d of discs)collide(d,ball,R,BR);
+  // Goal detection
+  if(ball.x<25 && Math.abs(ball.y-H/2)<GOAL/2){scores[1]++;updateScore();initialAfterGoal();return;}
+  if(ball.x>W-25 && Math.abs(ball.y-H/2)<GOAL/2){scores[0]++;updateScore();initialAfterGoal();return;}
+}
+function initialAfterGoal(){
+  discs.forEach((d,i)=>{d.x=d.team===0?115:685;d.y=105+(i%5)*72;d.vx=d.vy=0});
+  ball={x:400,y:250,vx:0,vy:0};
+}
+function moving(){return discs.some(d=>Math.hypot(d.vx,d.vy)>5)||Math.hypot(ball.vx,ball.vy)>5}
+function loop(){
+  if(animating){
+    for(let i=0;i<2;i++)step();
+    if(!moving()&&!lastSentFinish){
+      lastSentFinish=true;animating=false;
+      if(socket.connected&&roomCode&&playerIndex===turn)socket.emit("turnFinished");
+    }
+  }
+  draw();requestAnimationFrame(loop);
+}
+function pointerPos(e){const r=canvas.getBoundingClientRect();return{x:(e.clientX-r.left)*W/r.width,y:(e.clientY-r.top)*H/r.height}}
+canvas.addEventListener("pointerdown",e=>{
+  if(!started||animating||turn!==playerIndex)return;
+  const p=pointerPos(e);
+  const d=discs.find(x=>x.team===playerIndex&&Math.hypot(x.x-p.x,x.y-p.y)<R+10);
+  if(d){drag={d,x:d.x,y:d.y,px:p.x,py:p.y};canvas.setPointerCapture(e.pointerId);}
+});
+canvas.addEventListener("pointermove",e=>{if(drag){const p=pointerPos(e);drag.px=p.x;drag.py=p.y;draw();}});
+canvas.addEventListener("pointerup",e=>{
+  if(!drag)return;
+  const dx=drag.x-drag.px,dy=drag.y-drag.py,mag=Math.hypot(dx,dy);
+  if(mag>8){
+    const vx=dx/mag*Math.min(850,mag*5),vy=dy/mag*Math.min(850,mag*5);
+    const index=discs.filter(x=>x.team===playerIndex).indexOf(drag.d);
+    socket.emit("shoot",{disc:index,vx,vy});
+  }
+  drag=null;
+});
+document.getElementById("reset").onclick=()=>{initialState();started=false;roomCode=null;playerIndex=-1;roomInfo.textContent="بازی محلی آماده شد؛ برای مسابقه آنلاین اتاق بساز.";say("این دکمه فقط زمین را برای آزمایش محلی بازنشانی می‌کند.");};
+initialState();loop();
+</script>
+</body>
+</html>
